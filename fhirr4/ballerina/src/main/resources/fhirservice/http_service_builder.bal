@@ -16,10 +16,15 @@
 
 import ballerina/http;
 import ballerina/regex;
+import ballerina/log;
 import ballerinax/health.fhir.r4;
 
+const PATIENT_RESOURCE = "Patient";
+const PATIENT_ID_QUERY_PARAM = "_id";
+const PATIENT_QUERY_PARAM = "patient";
+
 // Construct an http service for a fhir service.
-isolated function getHttpService(Holder h, r4:ResourceAPIConfig apiConfig) returns http:Service {
+isolated function getHttpService(Holder h, r4:ResourceAPIConfig apiConfig, http:Client? authzClient, string? privilegedClaim) returns http:Service {
     http:InterceptableService httpService = isolated service object {
 
         private final Holder holder = h;
@@ -45,6 +50,20 @@ isolated function getHttpService(Holder h, r4:ResourceAPIConfig apiConfig) retur
                     }
                     r4:FHIRContext fhirContext = check r4:getFHIRContext(ctx);
                     string id = paths[paths.length() - 1];
+                    string resourceType = split[split.length() - 2];
+                    if resourceType == PATIENT_RESOURCE {
+                        http:Client? authClient = authzClient;
+                        if authClient is http:Client {
+                            // handle smart security
+                            r4:FHIRSecurity? fhirSecurity = fhirContext.getFHIRSecurity();
+                            if fhirSecurity is r4:FHIRSecurity {
+                                r4:FHIRError? handleSmartSecurityResult = handleSmartSecurity(id, authClient, fhirSecurity, privilegedClaim);
+                                if handleSmartSecurityResult is r4:FHIRError {
+                                    return handleSmartSecurityResult;
+                                }
+                            }
+                        }
+                    }
                     executeResourceResult = executeReadByID(id, fhirContext, fhirService, resourceMethod);
                     if (executeResourceResult is error) {
                         fhirContext.setInErrorState(true);
@@ -58,6 +77,24 @@ isolated function getHttpService(Holder h, r4:ResourceAPIConfig apiConfig) retur
                         return processSearch;
                     }
                     r4:FHIRContext fhirContext = check r4:getFHIRContext(ctx);
+                    http:Client? authClient = authzClient;
+                    if authClient is http:Client {
+                        // handle smart security
+                        string resourceType = split[split.length() - 1];
+                        string? patientID = ();
+                        if resourceType == PATIENT_RESOURCE {
+                            patientID = req.getQueryParamValue(PATIENT_ID_QUERY_PARAM);
+                        } else {
+                            patientID = req.getQueryParamValue(PATIENT_QUERY_PARAM);
+                        }
+                        r4:FHIRSecurity? fhirSecurity = fhirContext.getFHIRSecurity();
+                        if fhirSecurity is r4:FHIRSecurity {
+                            r4:FHIRError? handleSmartSecurityResult = handleSmartSecurity(patientID, authClient, fhirSecurity, privilegedClaim);
+                            if handleSmartSecurityResult is r4:FHIRError {
+                                return handleSmartSecurityResult;
+                            }
+                        }
+                    }
                     executeResourceResult = executeSearch(fhirContext, fhirService, resourceMethod);
                     if (executeResourceResult is error) {
                         fhirContext.setInErrorState(true);
@@ -113,3 +150,37 @@ isolated function getSplitPath(string restPath) returns string[] {
     string[] split = regex:split(path, "/").slice(1);
     return split;
 }
+
+isolated function handleSmartSecurity(string? patientId, http:Client authzClient, r4:FHIRSecurity fhirSecurity,
+            string? privilegedClaim) returns r4:FHIRError? {
+    AuthzRequest authzRequest = {
+        fhirSecurity : fhirSecurity,
+        patientId : patientId,
+        privilegedClaimUrl : privilegedClaim
+    };
+    AuthzResponse|http:ClientError authzRes = authzClient->post("/", authzRequest);
+    if authzRes is http:ClientError {
+        return r4:clientErrorToFhirError(authzRes);
+    } else {
+        if !authzRes.isAuthorized {
+            return r4:createFHIRError("Unauthorized", r4:ERROR, r4:SECURITY, httpStatusCode = http:STATUS_UNAUTHORIZED);
+        }
+        log:printDebug("User authorized", PatientId = patientId, Scope = authzRes.scope);
+    }
+}
+
+// todo: move these to a common place
+type AuthzRequest record {
+    r4:FHIRSecurity fhirSecurity;
+    string patientId?;
+    string privilegedClaimUrl?;
+};
+
+enum AuthzScope {
+    PATIENT, PRACTITIONER, PRIVILEGED
+};
+
+type AuthzResponse record {
+    boolean isAuthorized;
+    AuthzScope scope?;
+};

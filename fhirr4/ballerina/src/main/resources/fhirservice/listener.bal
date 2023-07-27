@@ -23,10 +23,18 @@ public isolated class Listener {
     private final http:Listener ls;
     private final r4:ResourceAPIConfig config;
     private http:Service httpService = isolated service object {};
+    private http:Client? authzClient = ();
+    private string? privilegedClaim = ();
 
-    public isolated function init(int port, r4:ResourceAPIConfig config) returns error? {
+    public isolated function init(int port, r4:ResourceAPIConfig config, string? authzService = (), string? privilegedClaim = ()) returns error? {
         self.ls = check new (port);
         self.config = config;
+        if (authzService is string) {
+            self.authzClient = check new (authzService);
+        }
+        if (privilegedClaim is string) {
+            self.privilegedClaim = privilegedClaim;
+        }
     }
 
     public isolated function 'start() returns error? {
@@ -44,7 +52,7 @@ public isolated class Listener {
     public isolated function attach(Service fhirService, string[]|string? name = ()) returns error? {
         Holder holder = new (fhirService);
         lock {
-            self.httpService = getHttpService(holder, self.config);
+            self.httpService = getHttpService(holder, self.config, self.authzClient, self.privilegedClaim);
             check self.ls.attach(self.httpService, name.cloneReadOnly());
         }
     }
